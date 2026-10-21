@@ -265,6 +265,9 @@
                                         "format"             : "array",
                                         "size-prefix-format" : "guint8",
                                         "array-element"      : { "format" : "guint8" } } ] },
+                    // SNR Delta is uint16 in units of 0.1 dB in the Qualcomm NAS IDL
+                    // (nas_lte_snr_delta_indicator_type); libqmi has guint8, which
+                    // leaves the TLV one byte short.
                     { "name"      : "LTE SNR Delta",
                       "id"        : "0x1B",
                       "type"      : "TLV",
@@ -274,7 +277,7 @@
                                         "format"        : "guint8",
                                         "public-format" : "gboolean" },
                                       { "name"          : "SNR Delta",
-                                        "format"        : "guint8" } ] },
+                                        "format"        : "guint16" } ] },
                     { "name"      : "LTE RSRP Delta",
                       "id"        : "0x1C",
                       "type"      : "TLV",

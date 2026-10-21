@@ -223,7 +223,17 @@
                       "type"      : "TLV",
                       "since"     : "1.0",
                       "format"    : "string",
-                      "prerequisites": [ { "common-ref" : "Success" } ] } ] },
+                      "prerequisites": [ { "common-ref" : "Success" } ] },
+                    // 0x10 and 0x11 are not in libqmi; from the Qualcomm DMS IDL
+                    // (dms_get_device_rev_id_resp_msg: boot_code_rev, pri_rev)
+                    { "name"      : "Boot Code Revision",
+                      "id"        : "0x10",
+                      "type"      : "TLV",
+                      "format"    : "string" },
+                    { "name"      : "PRI Revision",
+                      "id"        : "0x11",
+                      "type"      : "TLV",
+                      "format"    : "string" } ] },
 
   // *********************************************************************************
   {  "name"    : "Get MSISDN",
@@ -237,7 +247,17 @@
                       "type"      : "TLV",
                       "since"     : "1.0",
                       "format"    : "string",
-                      "prerequisites": [ { "common-ref" : "Success" } ] } ] },
+                      "prerequisites": [ { "common-ref" : "Success" } ] },
+                    // 0x10 and 0x11 are not in libqmi; from the Qualcomm DMS IDL
+                    // (dms_get_msisdn_resp_msg: mobile_id_number, imsi)
+                    { "name"      : "Mobile ID Number",
+                      "id"        : "0x10",
+                      "type"      : "TLV",
+                      "format"    : "string" },
+                    { "name"      : "IMSI",
+                      "id"        : "0x11",
+                      "type"      : "TLV",
+                      "format"    : "string" } ] },
 
   // *********************************************************************************
   {  "name"    : "Get IDs",

@@ -162,6 +162,20 @@ defmodule Eqmi.Builder do
         end
       end
 
+      # Introspecion which returns the details of a message
+      # returns, details from the specification (Eqmi.describe/2)
+      def messages,
+        do: unquote(Macro.escape(Enum.map(ctl_msgs, &Eqmi.Builder.Utils.describe_message/1)))
+
+      for description <-
+            ctl_msgs
+            |> Enum.map(&Eqmi.Builder.Utils.describe_message/1)
+            |> Enum.uniq_by(& &1.name) do
+        def describe(unquote(description.name)), do: unquote(Macro.escape(description))
+      end
+
+      def describe(_msg_name), do: nil
+
       for command <- ctl_msgs do
         msg_id =
           command["id"]

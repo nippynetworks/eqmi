@@ -92,6 +92,45 @@ defmodule Eqmi.Builder.Utils do
     end)
   end
 
+  @doc """
+  Return a compact, data-only description of a message: its name, id, type and
+  the TLVs it takes (`:input`) and returns (`:output`), each with the atom
+  the decoder uses, the TLV id, the format and nested fields.
+  """
+  def describe_message(command) do
+    %{
+      name: name_to_atom(command["name"]),
+      id: id_from_str(command["id"]),
+      type: if(command["type"] == "Indication", do: :indication, else: :message),
+      input: Enum.map(command["input"] || [], &describe_tlv/1),
+      output: Enum.map(command["output"] || command["indication"] || [], &describe_tlv/1)
+    }
+  end
+
+  defp describe_tlv(%{"format" => format} = t) do
+    # array elements of a plain type carry no name
+    base = %{name: name_to_atom(t["name"] || "element"), format: format}
+    base = if t["id"], do: Map.put(base, :id, id_from_str(t["id"])), else: base
+
+    case format do
+      f when f in ["sequence", "struct"] ->
+        Map.put(base, :fields, Enum.map(t["contents"], &describe_tlv/1))
+
+      "array" ->
+        base
+        |> Map.put(:element, describe_tlv(t["array-element"]))
+        |> Map.put(:size, t["fixed-size"] || t["size-prefix-format"] || "guint8")
+
+      "string" ->
+        if t["fixed-size"], do: Map.put(base, :size, t["fixed-size"]), else: base
+
+      _ ->
+        base
+    end
+  end
+
+  defp describe_tlv(t), do: %{name: name_to_atom(t["name"] || "element"), format: t["format"]}
+
   def transform_name(content) do
     transform_name_list(content, [])
   end

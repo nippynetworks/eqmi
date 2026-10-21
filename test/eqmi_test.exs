@@ -1,6 +1,4 @@
 defmodule EqmiTest do
-  require Logger
-
   use ExUnit.Case
   @ctl_response <<1, 23, 0, 128, 0, 0, 1, 2, 34, 0, 12, 0, 2, 4, 0, 0, 0, 0, 0, 1, 2, 0, 1, 2>>
   @dms_response <<1, 146, 0, 128, 2, 2, 2, 1, 0, 32, 0, 134, 0, 2, 4, 0, 0, 0, 0, 0, 1, 14, 0,
@@ -60,10 +58,13 @@ defmodule EqmiTest do
     end)
   end
 
-  setup do
-    common_setup()
+  # only the round trip through a simulated device needs the devices;
+  # the decode/encode tests below are pure
+  setup context do
+    if context[:device], do: common_setup(), else: :ok
   end
 
+  @tag :device
   test "send message", %{sim_device: device} do
     msgs = [{12, @sync_response}, {16, @ctl_response}]
     spawn(fn -> mock_read(device, msgs) end)
@@ -80,21 +81,21 @@ defmodule EqmiTest do
     assert :ok = res
   end
 
-  test "nas response", %{sim_device: _device} do
+  test "nas response" do
     payload = %{client_id: 5, sender_type: :service, service_type: :qmi_nas}
     msg = Eqmi.NAS.process_qmux_sdu(@nas_response, payload)
     [h | _] = msg.messages
     assert h.msg_id == 67
   end
 
-  test "wms indication", %{sim_device: _device} do
+  test "wms indication" do
     payload = %{client_id: 1, sender_type: :service, service_type: :qmi_wms}
     msg = Eqmi.WMS.process_qmux_sdu(@wms_indication, payload)
     [h | _] = msg.messages
     assert h.msg_id == 70
   end
 
-  test "nas event report request", %{sim_device: _device} do
+  test "nas event report request" do
     expected = <<2, 0, 7, 0, 16, 4, 0, 1, 2, 254, 2>>
 
     assert Eqmi.NAS.request(:set_event_report, [

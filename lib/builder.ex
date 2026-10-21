@@ -19,11 +19,14 @@ defmodule Eqmi.Builder do
       |> Enum.join()
       |> Jason.decode!()
 
-    [module | ctl] = svc_data
+    # Entries are selected by their "type" rather than by position: the
+    # files start with Service / Client / Message-ID-Enum / Indication-ID-Enum
+    # headers, but services without indications omit the last one, and some
+    # files put a common TLV definition first.
+    module = Enum.find(svc_data, fn x -> x["type"] == "Service" end)
 
     common_defs =
-      ctl
-      |> Enum.drop(3)
+      svc_data
       |> Enum.filter(fn x -> Map.has_key?(x, "common-ref") end)
       |> Enum.concat(common_base)
       |> Enum.reduce(%{}, fn x, acc ->
@@ -31,8 +34,7 @@ defmodule Eqmi.Builder do
       end)
 
     indications =
-      ctl
-      |> Enum.drop(3)
+      svc_data
       |> Enum.filter(fn e -> e["type"] == "Indication" end)
       |> update_in(
         [Access.all()],
@@ -48,8 +50,7 @@ defmodule Eqmi.Builder do
       )
 
     ctl_msgs =
-      ctl
-      |> Enum.drop(3)
+      svc_data
       |> Enum.filter(fn e -> e["type"] == "Message" end)
       |> Enum.concat(indications)
       |> Eqmi.Builder.Utils.replace_common(common_defs)

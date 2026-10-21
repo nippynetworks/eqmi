@@ -73,6 +73,27 @@ defmodule Eqmi.Device do
     end
   end
 
+  @doc """
+  The device's shared client for a service, allocated on first use and
+  owned by the device itself (released when the device stops). Indications
+  arriving on it are dropped.
+  """
+  def shared_client(dev_name, type) do
+    name = dev_name |> base_name() |> via_tuple()
+
+    case GenServer.call(name, {:shared_client, type}) do
+      {:ok, ref} ->
+        {:ok, ref}
+
+      :none ->
+        case Eqmi.Control.allocate_cid(dev_name, type) do
+          {:ok, cid} -> GenServer.call(name, {:new_shared_client, type, cid})
+          {:error, reason} -> {:error, reason}
+          other -> {:error, {:allocate, other}}
+        end
+    end
+  end
+
   @doc "Service type (e.g. `:qmi_nas`) of an allocated client."
   def client_type(dev_name, ref) do
     with {:ok, client} <- GenServer.call(base_name(dev_name) |> via_tuple(), {:get_client, ref}) do
@@ -110,6 +131,8 @@ defmodule Eqmi.Device do
     device = Keyword.fetch!(args, :device)
     transport = Keyword.get(args, :transport, :raw)
     options = [:write, :raw]
+    # so terminate/2 runs on supervisor shutdown and the clients get released
+    Process.flag(:trap_exit, true)
 
     case File.open(device, options) do
       {:ok, dev} ->
@@ -123,6 +146,7 @@ defmodule Eqmi.Device do
           mbim_tx: 1,
           control_points: %{},
           clients: %{},
+          shared: %{},
           pending: %{},
           ctl: nil
         }
@@ -240,6 +264,37 @@ defmodule Eqmi.Device do
   def handle_call({:release, ref}, _from, s) do
     new_state = release_base(ref, s)
     {:reply, :ok, new_state}
+  end
+
+  def handle_call({:shared_client, type}, _from, %{shared: shared} = s) do
+    case Map.fetch(shared, type) do
+      {:ok, ref} -> {:reply, {:ok, ref}, s}
+      :error -> {:reply, :none, s}
+    end
+  end
+
+  def handle_call({:new_shared_client, type, cid}, _from, %{shared: shared} = s) do
+    case Map.fetch(shared, type) do
+      {:ok, ref} ->
+        # another caller got there first: give the spare CID back
+        device = s.device_name
+        Task.start(fn -> Eqmi.Control.release_cid(device, type, cid) end)
+        {:reply, {:ok, ref}, s}
+
+      :error ->
+        ref = make_ref()
+        client_state = %ClientState{type: type, id: cid, current_tx: 0, pid: self()}
+        clients_ids = s.clients |> Map.get(type, %{}) |> Map.put(cid, self())
+
+        s = %{
+          s
+          | clients: Map.put(s.clients, type, clients_ids),
+            control_points: Map.put(s.control_points, ref, client_state),
+            shared: Map.put(shared, type, ref)
+        }
+
+        {:reply, {:ok, ref}, s}
+    end
   end
 
   def handle_call({:get_client, ref}, _from, %{control_points: controls} = s) do
@@ -361,6 +416,24 @@ defmodule Eqmi.Device do
     {:noreply, new_state}
   end
 
+  # an indication on a shared client: nobody owns it, so drop it
+  def handle_info({:qmux, msg}, s) do
+    Logger.debug("indication on the shared client dropped: #{inspect(msg)}")
+    {:noreply, s}
+  end
+
+  # the reader or the CTL state machine died; without either we are deaf,
+  # so stop and let the supervisor start a fresh device
+  def handle_info({:EXIT, pid, reason}, %{reader: pid} = s) do
+    {:stop, {:shutdown, {:reader_error, reason}}, s}
+  end
+
+  def handle_info({:EXIT, pid, reason}, %{ctl: pid} = s) do
+    {:stop, {:shutdown, {:control_error, reason}}, s}
+  end
+
+  def handle_info({:EXIT, _pid, _reason}, s), do: {:noreply, s}
+
   def handle_info({:error, reason}, s) do
     # the reader died or hit EOF; without it we are deaf, so restart the
     # whole device via the supervisor
@@ -373,14 +446,46 @@ defmodule Eqmi.Device do
     {:noreply, s}
   end
 
-  def terminate(_reason, %{transport: :mbim} = s) do
-    # close the MBIM session so the next client can OPEN cleanly
-    IO.binwrite(s.device, Eqmi.Mbim.close(s.mbim_tx))
-    File.close(s.device)
+  # Runs on every orderly stop: a {:stop, _} return (reader or Control
+  # died, reader hit EOF), GenServer.stop, and the supervisor's shutdown
+  # (application stop, SIGTERM, Eqmi.close/1) because init traps exits. It
+  # cannot run after a :kill or a VM abort; the CTL sync of the next open
+  # releases whatever those leave behind. The device may already be gone
+  # (unplugged), and a write to a dead descriptor raises, so nothing in
+  # here is allowed to abort the close.
+  def terminate(_reason, s) do
+    try do
+      s = release_all(s)
+      # close the MBIM session so the next client can OPEN cleanly
+      if s.transport == :mbim, do: IO.binwrite(s.device, Eqmi.Mbim.close(s.mbim_tx))
+    rescue
+      e -> Logger.debug("#{s.device_name}: cleanup on stop skipped: #{Exception.message(e)}")
+    after
+      File.close(s.device)
+    end
+
+    :ok
   end
 
-  def terminate(_reason, s) do
-    File.close(s.device)
+  # Give every client ID back to the modem before closing. Fire and forget:
+  # Control cannot be used from terminate/2 (it calls back into this
+  # process) and the responses are not needed. CIDs that still leak (the
+  # VM was killed) are released by the CTL sync of the next open.
+  defp release_all(%{control_points: controls} = s) do
+    controls
+    |> Map.values()
+    |> Enum.with_index(1)
+    |> Enum.reduce(s, fn {cp, tx}, s ->
+      msg =
+        Eqmi.CTL.request(:release_cid,
+          release_info: [service: Eqmi.service_type_id(cp.type), cid: cp.id]
+        )
+
+      payload = Eqmi.CTL.qmux_sdu(:request, rem(tx, 255) + 1, [msg])
+      header = Eqmi.QmuxHeader.new(:control_point, 0, :qmi_ctl, byte_size(payload))
+      {_res, s} = write_qmux(s, Eqmi.qmux_message(header, payload))
+      s
+    end)
   end
 
   defp release_base(ref, %{clients: clients, control_points: controls} = s) do

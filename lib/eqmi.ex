@@ -103,11 +103,62 @@ defmodule Eqmi do
   end
 
   @doc """
-  Send one request to the client's service and return the decoded response.
+  Introspection of a message params and returns, from the spec:
+  `%{name, id, type, input: [tlv], output: [tlv]}`
+  where each TLV has the `name` atom used in parameters, its
+  `id`, `format` and, for sequences and arrays, `fields` or
+  `element`.
+  Nil if the service or message is unknown.
+
+      iex> Eqmi.describe(:qmi_nas, :get_signal_strength).input
+      [%{name: :request_mask, id: 16, format: "guint16"}]
+  """
+  @spec describe(atom(), atom()) :: map() | nil
+  def describe(service, msg_name) do
+    case Eqmi.Types.service_module(service) do
+      nil -> nil
+      mod -> mod.describe(msg_name)
+    end
+  end
+
+  @doc "Every message and indication of a service, as `describe/2` returns them."
+  @spec messages(atom()) :: [map()]
+  def messages(service) do
+    case Eqmi.Types.service_module(service) do
+      nil -> []
+      mod -> mod.messages()
+    end
+  end
+
+  # `request_mask` overrides applied automatically when calling "get".
+  # Without them the modem answers with the mandatory TLVs only,
+  # which is rarely what a caller wants.
+  @query_defaults %{
+    {:qmi_nas, :get_signal_strength} => [request_mask: 0xFF],
+    {:qmi_wds, :get_current_settings} => [requested_settings: 0xFFFFFFFF]
+  }
+
+  @doc """
+  Default parameters added to `query/5` unless overriden by the caller passing the same key:
+  Only `query/5` applies these; not applied to `request/2` and `call/4`.
+  """
+  @spec query_defaults(atom(), atom()) :: keyword()
+  def query_defaults(service, msg_name), do: Map.get(@query_defaults, {service, msg_name}, [])
+
+  @doc """
+  Send one request and return the decoded response.
+
+  `client` is a client reference from `client/2`, or a service atom such
+  as `:qmi_nas` to use the device's shared client for that service, which
+  is allocated on first use has the same lifetime as the device. Use the
+  shared client for plain queries; allocate your own for anything with
+  per-client state on the modem (a data call, indication registrations).
 
   `msg_name` and `params` are what the service module's `request/2` takes,
-  e.g. `Eqmi.query(dev, nas, :get_signal_info)` or
-  `Eqmi.query(dev, wds, :start_network, apn: "internet")`.
+  e.g. `Eqmi.query(dev, :qmi_nas, :get_signal_info)` or
+  `Eqmi.query(dev, wds, :start_network, apn: "internet")`; see
+  `describe/2` for the parameter names and `query_defaults/2` for the
+  inputs added for you.
 
     * `{:ok, params}` - the response parameters as a map keyed by TLV name
       (the result TLV is checked and left out)
@@ -117,14 +168,24 @@ defmodule Eqmi do
       the call end reason
     * `{:error, :timeout}` or another `{:error, reason}` from the transport
   """
-  def query(dev_ref, client_ref, msg_name, params \\ [], timeout \\ 5_000) do
+  def query(dev_ref, client, msg_name, params \\ [], timeout \\ 5_000) do
     with {:ok, path} <- GenServer.call(__MODULE__, {:get_path, dev_ref}),
-         {:ok, service} <- Eqmi.Device.client_type(path, client_ref),
+         {:ok, client_ref, service} <- resolve_client(path, client),
          {:ok, mod} <- spec_module(service),
+         params = Keyword.merge(query_defaults(service, msg_name), params),
          {:ok, resp} <-
            Eqmi.Device.call(path, client_ref, [mod.request(msg_name, params)], timeout) do
       query_result(resp)
     end
+  end
+
+  defp resolve_client(path, service) when is_atom(service) do
+    with {:ok, ref} <- Eqmi.Device.shared_client(path, service), do: {:ok, ref, service}
+  end
+
+  defp resolve_client(path, client_ref) do
+    with {:ok, service} <- Eqmi.Device.client_type(path, client_ref),
+         do: {:ok, client_ref, service}
   end
 
   defp spec_module(service) do

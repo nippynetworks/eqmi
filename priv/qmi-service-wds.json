@@ -2211,7 +2211,33 @@
                      "since"         : "1.28",
                      "format"        : "guint8",
                      "public-format" : "gboolean",
-                     "prerequisites" : [ { "common-ref" : "Success" } ] } ] },
+                     "prerequisites" : [ { "common-ref" : "Success" } ] },
+                   // 0x16 and 0x17 are in neither libqmi nor the 2017 Qualcomm WDS IDL.
+                   // Both are 16 address bytes plus a prefix length, the layout of the
+                   // IPv6 TLVs in Get Current Settings. Observed on an EM12-G with an
+                   // IPv6-only attach PDN: 0x16 an address inside the PDN's /64 (not the
+                   // data call's address or gateway), 0x17 fe80::1/64. The names describe
+                   // what is seen; the meaning is not documented.
+                   { "name"      : "LTE Attach IPv6 Address",
+                     "id"        : "0x16",
+                     "type"      : "TLV",
+                     "format"    : "sequence",
+                     "contents"  : [ { "name"          : "Address",
+                                       "format"        : "array",
+                                       "fixed-size"    : "8",
+                                       "array-element" : { "format": "guint16", "endian": "network" } },
+                                     { "name"   : "Prefix Length",
+                                       "format" : "guint8" } ] },
+                   { "name"      : "LTE Attach IPv6 Link Local Address",
+                     "id"        : "0x17",
+                     "type"      : "TLV",
+                     "format"    : "sequence",
+                     "contents"  : [ { "name"          : "Address",
+                                       "format"        : "array",
+                                       "fixed-size"    : "8",
+                                       "array-element" : { "format": "guint16", "endian": "network" } },
+                                     { "name"   : "Prefix Length",
+                                       "format" : "guint8" } ] } ] },
 
   // *********************************************************************************
   {  "name"    : "Bind Data Port",

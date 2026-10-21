@@ -28,6 +28,21 @@ defmodule EqmiIdlExtensionsTest do
     refute Map.has_key?(params, :unknown)
   end
 
+  test "WDS Get LTE Attach Parameters decodes the attach PDN IPv6 TLVs" do
+    # captured from an EM12-G on an IPv6-only attach PDN
+    tlvs =
+      <<0x11, 1::little-16, 1, 0x16, 17::little-16, 42, 0, 35, 238, 40, 32, 7, 132, 46, 180, 168, 49, 51, 3,
+        55, 217, 64, 0x17, 17::little-16, 254, 128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 64>>
+
+    msg = <<0x85, 0, byte_size(tlvs)::little-16, tlvs::binary>>
+    assert [%{parameters: params}] = decode(Eqmi.WDS, :response, msg, :qmi_wds).messages
+
+    assert params.ip_support_type == 1
+    assert params.lte_attach_ipv6_address == %{address: [0x2A00, 0x23EE, 0x2820, 0x0784, 0x2EB4, 0xA831, 0x3303, 0x37D9], prefix_length: 64}
+    assert params.lte_attach_ipv6_link_local_address == %{address: [0xFE80, 0, 0, 0, 0, 0, 0, 1], prefix_length: 64}
+    refute Map.has_key?(params, :unknown)
+  end
+
   test "DMS Get MSISDN decodes the mobile id number and IMSI" do
     msg = Eqmi.DMS.response(:get_msisdn, msisdn: "447700900123", mobile_id_number: "0000000000", imsi: "234300000000001", result: @ok)
     assert [%{parameters: %{msisdn: "447700900123", imsi: "234300000000001", mobile_id_number: "0000000000"}}] =

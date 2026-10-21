@@ -28,7 +28,16 @@ defmodule Eqmi do
   end
 
   @doc """
-  Open (or fetch) a QMI device. Options:
+  Open a QMI device, or fetch the one already open on that path.
+
+  One `Eqmi.Device` process serves each path and every caller in this VM
+  shares it; the returned reference stays valid across restarts of the
+  Device, but client references allocated from it do not (the restarted
+  Device answers `{:error, :unknown_client}` for them, so allocate again).
+  Only one operating-system process can usefully read a cdc-wdm device at
+  a time, so two VMs opening the same path steal each other's responses.
+
+  Options:
 
     * `:transport` - `:raw` (default, cdc-wdm QMUX) or `:mbim`
       (QMI-over-MBIM passthrough for a modem in MBIM mode)
@@ -37,6 +46,12 @@ defmodule Eqmi do
   def device(path, opts \\ []) do
     # the MBIM transport does a CLOSE/OPEN handshake in init, so allow time
     GenServer.call(__MODULE__, {:get_device, path, opts}, 15_000)
+  end
+
+  @doc "Close a device: its clients are released on the modem and the process stops."
+  @spec close(reference()) :: :ok | {:error, :device_not_found}
+  def close(dev_ref) do
+    GenServer.call(__MODULE__, {:close_device, dev_ref}, 15_000)
   end
 
   def start_link(_args) do
@@ -135,25 +150,57 @@ defmodule Eqmi do
 
   def handle_call({:get_device, device_path, opts}, _from, state) do
     path = device_path |> String.trim()
+    ref = Map.get(state.devices, path)
 
-    case Map.get(state.devices, path) do
-      nil ->
-        spec = {Eqmi.Device, [device: path] ++ opts}
+    # the Device may have been lost with its supervisor since it was opened;
+    # a known path whose process is gone is started again under the same ref
+    cond do
+      ref != nil and Eqmi.Device.whereis(path) != nil ->
+        {:reply, {:ok, ref}, state}
 
-        case DynamicSupervisor.start_child(Eqmi.DynamicSupervisor, spec) do
+      true ->
+        case DynamicSupervisor.start_child(
+               Eqmi.DynamicSupervisor,
+               {Eqmi.Device, [device: path] ++ opts}
+             ) do
           {:ok, _pid} ->
-            ref = make_ref()
-            r = Map.put(state.refs, ref, path)
-            d = Map.put(state.devices, path, ref)
-            new_state = %{devices: d, refs: r}
-            {:reply, {:ok, ref}, new_state}
+            ref = ref || make_ref()
+
+            state = %{
+              state
+              | devices: Map.put(state.devices, path, ref),
+                refs: Map.put(state.refs, ref, path)
+            }
+
+            {:reply, {:ok, ref}, state}
+
+          {:error, {:already_started, _pid}} ->
+            ref = ref || make_ref()
+
+            state = %{
+              state
+              | devices: Map.put(state.devices, path, ref),
+                refs: Map.put(state.refs, ref, path)
+            }
+
+            {:reply, {:ok, ref}, state}
 
           {:error, error} ->
             {:reply, {:error, error}, state}
         end
+    end
+  end
 
-      dev ->
-        {:reply, {:ok, dev}, state}
+  def handle_call({:close_device, ref}, _from, state) do
+    case Map.pop(state.refs, ref) do
+      {nil, _} ->
+        {:reply, {:error, :device_not_found}, state}
+
+      {path, refs} ->
+        if pid = Eqmi.Device.whereis(path),
+          do: DynamicSupervisor.terminate_child(Eqmi.DynamicSupervisor, pid)
+
+        {:reply, :ok, %{state | devices: Map.delete(state.devices, path), refs: refs}}
     end
   end
 
@@ -164,16 +211,6 @@ defmodule Eqmi do
 
       path ->
         {:reply, {:ok, path}, state}
-    end
-  end
-
-  def handle_call({:get_client, ref}, _from, %{control_points: controls} = s) do
-    client = Map.get(controls, ref)
-
-    if client != nil do
-      {:reply, {:ok, client}, s}
-    else
-      {:reply, {:error, "control_point not found"}, s}
     end
   end
 

@@ -28,6 +28,14 @@ defmodule Eqmi.Device do
     Module.concat(__MODULE__, base_name)
   end
 
+  @doc "Pid of the Device serving a path, or nil when none is running."
+  def whereis(device) do
+    case Registry.lookup(:eqmi_registry, base_name(device)) do
+      [{pid, _}] -> pid
+      [] -> nil
+    end
+  end
+
   def stop(dev_name, reason \\ :shutdown, timeout \\ :infinity) do
     dev_name
     |> base_name()
@@ -240,7 +248,7 @@ defmodule Eqmi.Device do
     if client != nil do
       {:reply, {:ok, client}, s}
     else
-      {:reply, {:error, "control_point not found"}, s}
+      {:reply, {:error, :unknown_client}, s}
     end
   end
 
@@ -258,7 +266,7 @@ defmodule Eqmi.Device do
         {:reply, res, %{s | control_points: new_ctrls}}
 
       nil ->
-        {:reply, {:error, "control_point not found"}, s}
+        {:reply, {:error, :unknown_client}, s}
     end
   end
 
@@ -285,7 +293,7 @@ defmodule Eqmi.Device do
         end
 
       nil ->
-        {:reply, {:error, "control_point not found"}, s}
+        {:reply, {:error, :unknown_client}, s}
     end
   end
 

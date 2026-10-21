@@ -44,10 +44,11 @@ iex(5)>flush
    messages: [
      %{
        msg_id: 32,
-       parameters: [
-         %{packet_data_handle: 2688802694, param_id: 1},
-         %{param_id: 2, result: %{error_code: 0, error_status: 0}}
-       ]
+       name: :start_network,
+       parameters: %{
+         packet_data_handle: 2688802694,
+         result: %{error_code: 0, error_status: 0}
+       }
      }
    ],
    sender_type: :service,
@@ -61,15 +62,13 @@ iex(5)>flush
    messages: [
      %{
        msg_id: 34,
-       parameters: [
-         %{param_id: <<20>>, value: <<5>>},
-         %{param_id: <<19>>, value: <<128, 136>>},
-         %{ip_family: 4, param_id: 18},
-         %{
-           connection_status: %{reconfiguration_required: 0, status: 2},
-           param_id: 1
-         }
-       ]
+       name: :packet_service_status,
+       parameters: %{
+         connection_status: %{reconfiguration_required: 0, status: 2},
+         ip_family: 4,
+         bearer_id: 5,
+         unknown: %{19 => <<128, 136>>}
+       }
      }
    ],
    sender_type: :service,
@@ -94,6 +93,10 @@ to change qmi_wwan driver to use Raw-IP
 ```
 echo Y > /sys/class/net/wwan0/qmi/raw_ip
 ```
+
+Each decoded message carries its spec `name`, and `parameters` is a map
+keyed by TLV name. TLVs the spec does not know (or whose payload does not
+match it) are kept as raw bytes under `:unknown`, by TLV id.
 
 ### NAS control point
 
@@ -126,13 +129,11 @@ iex(6)> flush
    messages: [
      %{
        msg_id: 79,
-       parameters: [
-         %{
-           lte_signal_strength: %{rsrp: 65425, rsrq: 242, rssi: 174, snr: 34},
-           param_id: 20
-         },
-         %{param_id: 2, result: %{error_code: 0, error_status: 0}}
-       ]
+       name: :get_signal_info,
+       parameters: %{
+         lte_signal_strength: %{rsrp: -111, rsrq: -14, rssi: -82, snr: 34},
+         result: %{error_code: 0, error_status: 0}
+       }
      }
    ],
    sender_type: :service,

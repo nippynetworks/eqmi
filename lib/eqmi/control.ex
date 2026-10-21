@@ -194,12 +194,8 @@ defmodule Eqmi.Control do
     {:keep_state_and_data, [:postpone]}
   end
 
-  defp get_cid(%{msg_id: @allocation_msg_id, parameters: params}) do
-    params
-    |> Enum.find_value(fn x ->
-      v = Map.get(x, :allocation_info)
-      if v != nil, do: v.cid
-    end)
+  defp get_cid(%{msg_id: @allocation_msg_id, parameters: %{allocation_info: %{cid: cid}}}) do
+    cid
   end
 
   defp get_cid(_msg) do
@@ -207,7 +203,7 @@ defmodule Eqmi.Control do
   end
 
   defp qmi_result(%{messages: [%{parameters: params} | _]}) do
-    case Enum.find_value(params, &Map.get(&1, :result)) do
+    case Map.get(params, :result) do
       %{error_status: 0, error_code: 0} -> :ok
       nil -> {:error, :no_result_tlv}
       result -> {:error, {:qmi_error, result}}

@@ -1,9 +1,7 @@
 defmodule Eqmi.Builder do
   alias Eqmi.Types
 
-  common_base =
-    File.read!("priv/qmi-common.json")
-    |> Jason.decode!()
+  common_base = Eqmi.Builder.Utils.read_spec("priv/qmi-common.json")
 
   {:ok, flist} = File.ls("priv")
 
@@ -19,50 +17,10 @@ defmodule Eqmi.Builder do
   end
 
   for svc_file_name <- svc_list do
-    svc_data =
-      File.stream!(svc_file_name)
-      |> Stream.filter(fn line -> !(line |> String.trim() |> String.starts_with?("//")) end)
-      |> Enum.join()
-      |> Jason.decode!()
+    {service_name, ctl_msgs} = Eqmi.Builder.Utils.load_service(svc_file_name, common_base)
 
-    # Entries are selected by their "type" rather than by position: the
-    # files start with Service / Client / Message-ID-Enum / Indication-ID-Enum
-    # headers, but services without indications omit the last one, and some
-    # files put a common TLV definition first.
-    module = Enum.find(svc_data, fn x -> x["type"] == "Service" end)
-
-    common_defs =
-      svc_data
-      |> Enum.filter(fn x -> Map.has_key?(x, "common-ref") end)
-      |> Enum.concat(common_base)
-      |> Enum.reduce(%{}, fn x, acc ->
-        Map.put(acc, x["common-ref"], Map.delete(x, "common-ref"))
-      end)
-
-    indications =
-      svc_data
-      |> Enum.filter(fn e -> e["type"] == "Indication" end)
-      |> update_in(
-        [Access.all()],
-        &with(
-          {v, m} <- Map.pop(&1, "output"),
-          do:
-            if v != nil do
-              Map.put(m, "indication", v)
-            else
-              m
-            end
-        )
-      )
-
-    ctl_msgs =
-      svc_data
-      |> Enum.filter(fn e -> e["type"] == "Message" end)
-      |> Enum.concat(indications)
-      |> Eqmi.Builder.Utils.replace_common(common_defs)
-
-    tx_bits = if module["name"] == "CTL", do: 1, else: 2
-    type_shift = if module["name"] == "CTL", do: 1, else: 0
+    tx_bits = if service_name == "CTL", do: 1, else: 2
+    type_shift = if service_name == "CTL", do: 1, else: 0
 
     decoder_generator = [
       {"decode_request_tlv", "input"},
@@ -87,7 +45,7 @@ defmodule Eqmi.Builder do
       {"response", "output"}
     ]
 
-    defmodule Module.concat(Eqmi, module["name"]) do
+    defmodule Module.concat(Eqmi, service_name) do
       require Eqmi.Builder.Decoder
       require Eqmi.Builder.Encoder
       require Logger

@@ -1,4 +1,54 @@
 defmodule Eqmi.Builder.Utils do
+  @doc "Read a libqmi spec file: drop the // comment lines and decode the JSON."
+  def read_spec(path) do
+    path
+    |> File.stream!()
+    |> Stream.reject(fn line -> line |> String.trim() |> String.starts_with?("//") end)
+    |> Enum.join()
+    |> Jason.decode!()
+  end
+
+  @doc """
+  Load a service spec file: returns `{service_name, messages}` where messages
+  are the "Message" and "Indication" entries with every common-ref resolved
+  and an indication's "output" renamed to "indication".
+
+  Entries are selected by their "type" rather than by position: the files
+  start with Service / Client / Message-ID-Enum / Indication-ID-Enum headers,
+  but services without indications omit the last one, and some files put a
+  common TLV definition first.
+  """
+  def load_service(path, common_base) do
+    svc_data = read_spec(path)
+    module = Enum.find(svc_data, fn x -> x["type"] == "Service" end)
+
+    common_defs =
+      svc_data
+      |> Enum.filter(fn x -> Map.has_key?(x, "common-ref") end)
+      |> Enum.concat(common_base)
+      |> Enum.reduce(%{}, fn x, acc ->
+        Map.put(acc, x["common-ref"], Map.delete(x, "common-ref"))
+      end)
+
+    indications =
+      svc_data
+      |> Enum.filter(fn e -> e["type"] == "Indication" end)
+      |> Enum.map(fn e ->
+        case Map.pop(e, "output") do
+          {nil, m} -> m
+          {v, m} -> Map.put(m, "indication", v)
+        end
+      end)
+
+    messages =
+      svc_data
+      |> Enum.filter(fn e -> e["type"] == "Message" end)
+      |> Enum.concat(indications)
+      |> replace_common(common_defs)
+
+    {module["name"], messages}
+  end
+
   # ids are written as "0x..." hex of any length and case ("0x1", "0x000e")
   def id_from_str("0x" <> hex), do: String.to_integer(hex, 16)
   def id_from_str("0X" <> hex), do: String.to_integer(hex, 16)

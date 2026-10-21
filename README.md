@@ -29,6 +29,64 @@ Indications are still delivered to the client's mailbox as `{:qmux, msg}`.
 
 The sections below show the lower-level `send_message/3` flow.
 
+### Parameters
+
+A message's parameters are the TLV names of the libqmi spec in `priv/`,
+lower-cased with underscores, so `Eqmi.describe/2` is the reference:
+
+```
+iex> Eqmi.describe(:qmi_nas, :get_signal_strength)
+%{name: :get_signal_strength, id: 32, type: :message,
+  input: [%{name: :request_mask, id: 16, format: "guint16"}],
+  output: [%{name: :result, ...}, %{name: :signal_strength, format: "sequence",
+            fields: [%{name: :strength, ...}, %{name: :radio_interface, ...}]}, ...]}
+iex> Eqmi.messages(:qmi_dms) |> Enum.map(& &1.name)
+[:reset, :set_event_report, :get_capabilities, ...]
+```
+
+A few "get" messages only return what the request asks for. NAS Get
+Signal Strength needs `request_mask` (bit 0 RSSI, 1 ECIO, 2 IO, 3 SINR,
+4 error rate, 5 RSRQ, 6 LTE SNR, 7 LTE RSRP) or the modem answers with the
+mandatory `signal_strength` TLV alone, and WDS Get Current Settings needs
+`requested_settings`. `Eqmi.query/5` fills these in (`request_mask: 0xFF`,
+`requested_settings: 0xFFFFFFFF`, see `Eqmi.query_defaults/2`) unless you
+pass the key yourself; `request/2` and `call/4` send exactly what they are
+given. For a periodic signal poll prefer NAS Get Signal Info, which needs
+no mask and reports every radio in one TLV.
+
+### Clients
+
+The modem allocates a client ID (CID) per service and keeps state per
+client: a data call belongs to the WDS client that started it, indication
+registrations belong to the client that made them. CIDs are a scarce
+resource on the modem (it reports `client_ids_exhausted` when the pool for
+a service runs out), so:
+
+* **One device per VM.** `Eqmi.device/1` opens a path once and every
+  caller shares it. Only one operating-system process can read a cdc-wdm
+  device at a time: a second reader (another VM, or qmicli without
+  qmi-proxy) steals responses and its CTL sync releases every client the
+  first process holds.
+* **Plain queries use the shared client.** `Eqmi.query(dev, :qmi_nas, ...)`
+  uses a client the device allocates once per service and owns itself.
+* **Allocate your own client for state.** `Eqmi.client/2` gives a client
+  owned by the calling process: use it for data calls and for anything that
+  registers indications, and keep it for as long as that state matters.
+  Indications arrive in the owner's mailbox as `{:qmux, msg}`.
+* **Release is automatic.** A client is released on the modem when its
+  owner process exits, when `Eqmi.release_client/2` is called, and for
+  every client when the device stops (`Eqmi.close/1`, application
+  shutdown, SIGTERM). Clients leaked by a killed VM are released by the
+  CTL sync the next open performs.
+* **Requests do not need separate clients.** The device serialises writes
+  and matches responses by client and transaction id, so any number of
+  processes can send requests through one client concurrently.
+
+Avoid opening and closing the device repeatedly (one process per request,
+as a qmicli wrapper does): cdc-wdm keeps unread data across close and
+reopen, and rapid open/close cycles have wedged the kernel driver in ways
+only a reboot clears.
+
 ### WDS control point
 
 This example shows how to stablish a data connection similar to

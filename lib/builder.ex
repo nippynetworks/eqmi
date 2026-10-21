@@ -124,15 +124,6 @@ defmodule Eqmi.Builder do
         |> :erlang.list_to_binary()
       end
 
-      def encode_tlv_raw(type, v) do
-        t = <<type::unsigned-integer-size(16)>>
-        val_len = byte_size(v)
-        l = <<val_len::unsigned-integer-size(16)>>
-
-        [t, l, v]
-        |> :binary.list_to_bin()
-      end
-
       defp process_messages(<<>>, _, _, msgs) do
         msgs
       end

@@ -65,6 +65,13 @@ defmodule Eqmi.Device do
     end
   end
 
+  @doc "Service type (e.g. `:qmi_nas`) of an allocated client."
+  def client_type(dev_name, ref) do
+    with {:ok, client} <- GenServer.call(base_name(dev_name) |> via_tuple(), {:get_client, ref}) do
+      {:ok, client.type}
+    end
+  end
+
   def send_message(dev_name, ref, msg) do
     dev_name
     |> base_name()
@@ -328,7 +335,6 @@ defmodule Eqmi.Device do
         {:noreply, s}
     end
   end
-
 
   def handle_info({:DOWN, ref, :process, _object, _reason}, state) do
     # release the CID on the modem too, or it stays allocated until the

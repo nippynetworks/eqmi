@@ -2,6 +2,33 @@
 
 QMI (Qualcomm MSM Interface) client implementation in Elixir
 
+### Request / response in one call
+
+`Eqmi.query/5` encodes a request for the client's service, waits for the
+matching response and returns the TLV parameters as a map. The "result" TLV is
+returned as the function result:
+
+```
+iex> {:ok, dev} = Eqmi.device("/dev/cdc-wdm0")
+iex> nas = Eqmi.client(dev, :qmi_nas)
+iex> Eqmi.query(dev, nas, :get_signal_info)
+{:ok, %{lte_signal_strength: %{rsrp: -111, rsrq: -14, rssi: -82, snr: 34}}}
+
+iex> wds = Eqmi.client(dev, :qmi_wds)
+iex> Eqmi.query(dev, wds, :get_current_settings, requested_settings: 0xFFFFFFFF)
+{:error, {:qmi, :out_of_call, %{result: %{error_status: 1, error_code: 15}}}}
+```
+
+Errors are of the form `{:error, {:qmi, reason, params}}` with the reason
+as per libqmi (`Eqmi.Error.protocol/1`)
+`params` shows the complete TLV of the response,
+so a failed `:start_network` has a `verbose_call_end_reason`,
+which `Eqmi.Error.verbose_call_end_reason/1` will translate into:
+`{:internal, :interface_in_use_config_match}`.
+Indications are still delivered to the client's mailbox as `{:qmux, msg}`.
+
+The sections below show the lower-level `send_message/3` flow.
+
 ### WDS control point
 
 This example shows how to stablish a data connection similar to

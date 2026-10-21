@@ -26,6 +26,13 @@ defmodule Eqmi.Types do
   }
   @message_types %{0 => :request, 2 => :response, 4 => :indication}
 
+  @doc "The generated spec module for a service, or nil when there is no spec for it."
+  def service_module(service) do
+    name = service |> Atom.to_string() |> String.replace_prefix("qmi_", "") |> String.upcase()
+    mod = Module.concat(Eqmi, name)
+    if Code.ensure_loaded?(mod), do: mod
+  end
+
   def get_sender_atom(type_id) do
     @sender_types[type_id]
   end

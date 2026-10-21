@@ -87,6 +87,48 @@ defmodule Eqmi do
     end
   end
 
+  @doc """
+  Send one request to the client's service and return the decoded response.
+
+  `msg_name` and `params` are what the service module's `request/2` takes,
+  e.g. `Eqmi.query(dev, nas, :get_signal_info)` or
+  `Eqmi.query(dev, wds, :start_network, apn: "internet")`.
+
+    * `{:ok, params}` - the response parameters as a map keyed by TLV name
+      (the result TLV is checked and left out)
+    * `{:error, {:qmi, reason, params}}` - the modem answered with an error;
+      `reason` is the error name from `Eqmi.Error` (or the code when unknown)
+      and `params` the full parameter map, which for Start Network carries
+      the call end reason
+    * `{:error, :timeout}` or another `{:error, reason}` from the transport
+  """
+  def query(dev_ref, client_ref, msg_name, params \\ [], timeout \\ 5_000) do
+    with {:ok, path} <- GenServer.call(__MODULE__, {:get_path, dev_ref}),
+         {:ok, service} <- Eqmi.Device.client_type(path, client_ref),
+         {:ok, mod} <- spec_module(service),
+         {:ok, resp} <-
+           Eqmi.Device.call(path, client_ref, [mod.request(msg_name, params)], timeout) do
+      query_result(resp)
+    end
+  end
+
+  defp spec_module(service) do
+    case Eqmi.Types.service_module(service) do
+      nil -> {:error, {:no_spec, service}}
+      mod -> {:ok, mod}
+    end
+  end
+
+  defp query_result(%{messages: [%{parameters: params} | _]}) do
+    case Map.pop(params, :result) do
+      {%{error_status: 0}, rest} -> {:ok, rest}
+      {%{error_code: code}, _} -> {:error, {:qmi, Eqmi.Error.protocol(code), params}}
+      {nil, _} -> {:error, {:qmi, :no_result_tlv, params}}
+    end
+  end
+
+  defp query_result(resp), do: {:error, {:bad_response, resp}}
+
   def init(_) do
     {:ok, %{devices: %{}, refs: %{}}}
   end

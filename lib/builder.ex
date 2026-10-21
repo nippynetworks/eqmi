@@ -12,6 +12,12 @@ defmodule Eqmi.Builder do
     |> Enum.filter(fn x -> String.contains?(x, "service") end)
     |> Enum.map(fn x -> Path.join("priv", x) end)
 
+  # the generated modules are compiled from these files, so a change to one
+  # of them must recompile this file
+  for f <- ["priv/qmi-common.json" | svc_list] do
+    Module.put_attribute(__MODULE__, :external_resource, f)
+  end
+
   for svc_file_name <- svc_list do
     svc_data =
       File.stream!(svc_file_name)
@@ -63,6 +69,18 @@ defmodule Eqmi.Builder do
       {"decode_response_tlv", "output"},
       {"decode_indication_tlv", "indication"}
     ]
+
+    # One decoder clause per (direction, message id, TLV id). Vendor messages
+    # that reuse a message id (DMS 0x5556, 0x5571) would otherwise produce
+    # duplicate clauses; the first definition wins.
+    decoder_clauses =
+      for command <- ctl_msgs,
+          {fun, direction} <- decoder_generator,
+          params <- Map.get(command, direction, []) |> Eqmi.Builder.Utils.transform_name() do
+        {fun, Eqmi.Builder.Utils.id_from_str(command["id"]),
+         Eqmi.Builder.Utils.id_from_str(params["id"]), params}
+      end
+      |> Enum.uniq_by(fn {fun, msg_id, param_id, _params} -> {fun, msg_id, param_id} end)
 
     encoder_generator = [
       {"request", "input"},
@@ -154,34 +172,24 @@ defmodule Eqmi.Builder do
         &decode_indication_tlv/3
       end
 
+      for {fun, msg_id, param_id, params} <- decoder_clauses do
+        defp unquote(:"#{fun}")(
+               unquote(msg_id),
+               <<unquote(param_id)::unsigned-integer-size(8)>>,
+               msg
+             ) do
+          if false do
+            msg
+          else
+            Eqmi.Builder.Decoder.create(unquote(params), unquote(param_id))
+          end
+        end
+      end
+
       for command <- ctl_msgs do
         msg_id =
           command["id"]
           |> Eqmi.Builder.Utils.id_from_str()
-
-        for {fun, direction} <- decoder_generator do
-          elements =
-            Map.get(command, direction, [])
-            |> Eqmi.Builder.Utils.transform_name()
-
-          for params <- elements do
-            param_id =
-              params["id"]
-              |> Eqmi.Builder.Utils.id_from_str()
-
-            defp unquote(:"#{fun}")(
-                   unquote(msg_id),
-                   <<unquote(param_id)::unsigned-integer-size(8)>>,
-                   msg
-                 ) do
-              if false do
-                msg
-              else
-                Eqmi.Builder.Decoder.create(unquote(params), unquote(param_id))
-              end
-            end
-          end
-        end
 
         if command["type"] == "Indication" do
           elements =

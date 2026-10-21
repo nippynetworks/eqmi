@@ -1,12 +1,7 @@
 defmodule Eqmi.Builder.Utils do
-  def id_from_str(str_id) do
-    str_id
-    |> String.split("x")
-    |> Enum.drop(1)
-    |> hd
-    |> Base.decode16!()
-    |> :binary.decode_unsigned()
-  end
+  # ids are written as "0x..." hex of any length and case ("0x1", "0x000e")
+  def id_from_str("0x" <> hex), do: String.to_integer(hex, 16)
+  def id_from_str("0X" <> hex), do: String.to_integer(hex, 16)
 
   def replace_common(elements, common_def) do
     elements
@@ -33,9 +28,18 @@ defmodule Eqmi.Builder.Utils do
     end)
   end
 
+  # A use site may carry its own "id", "name" or "since" on top of the shared
+  # definition (newer libqmi data defines some common TLVs without an id and
+  # assigns one per message), so the two are merged with the use site winning.
   defp replace_list(content, common_def) do
     content
-    |> Enum.map(fn x -> Map.get(common_def, x["common-ref"], x) end)
+    |> Enum.map(fn
+      %{"common-ref" => ref} = x when is_map_key(common_def, ref) ->
+        Map.merge(common_def[ref], Map.delete(x, "common-ref"))
+
+      x ->
+        x
+    end)
   end
 
   def transform_name(content) do

@@ -2212,6 +2212,14 @@
                      "format"        : "guint8",
                      "public-format" : "gboolean",
                      "prerequisites" : [ { "common-ref" : "Success" } ] },
+                   // 0x13 is in neither libqmi nor the 2017 Qualcomm WDS IDL. Observed on an
+                   // EM12-G with an IPv4 attach PDN: a little-endian guint32 equal to the
+                   // IPv4 address the data call then reported (same layout as the IPv4
+                   // address in Get Current Settings).
+                   { "name"      : "LTE Attach IPv4 Address",
+                     "id"        : "0x13",
+                     "type"      : "TLV",
+                     "format"    : "guint32" },
                    // 0x16 and 0x17 are in neither libqmi nor the 2017 Qualcomm WDS IDL.
                    // Both are 16 address bytes plus a prefix length, the layout of the
                    // IPv6 TLVs in Get Current Settings. Observed on an EM12-G with an

@@ -43,6 +43,16 @@ defmodule EqmiIdlExtensionsTest do
     refute Map.has_key?(params, :unknown)
   end
 
+  test "WDS Get LTE Attach Parameters decodes the attach PDN IPv4 address" do
+    # captured from an EM12-G attached as IPv4: 100.69.195.81
+    tlvs = <<0x11, 1::little-16, 0, 0x13, 4::little-16, 81, 195, 69, 100>>
+    msg = <<0x85, 0, byte_size(tlvs)::little-16, tlvs::binary>>
+    assert [%{parameters: %{ip_support_type: 0, lte_attach_ipv4_address: 0x6445C351} = params}] =
+             decode(Eqmi.WDS, :response, msg, :qmi_wds).messages
+
+    refute Map.has_key?(params, :unknown)
+  end
+
   test "DMS Get MSISDN decodes the mobile id number and IMSI" do
     msg = Eqmi.DMS.response(:get_msisdn, msisdn: "447700900123", mobile_id_number: "0000000000", imsi: "234300000000001", result: @ok)
     assert [%{parameters: %{msisdn: "447700900123", imsi: "234300000000001", mobile_id_number: "0000000000"}}] =

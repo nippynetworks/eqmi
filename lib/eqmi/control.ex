@@ -1,7 +1,9 @@
 defmodule Eqmi.Control do
   use GenStateMachine, callback_mode: :state_functions
 
-  @allocation_msg_id 34
+  @sync_msg_id 0x27
+  @allocation_msg_id 0x22
+  @release_msg_id 0x23
   require Logger
 
   @moduledoc """
@@ -9,10 +11,12 @@ defmodule Eqmi.Control do
   """
   defmodule CTLState do
     @moduledoc false
-    # current_tx: current transaction id
-    # server_pid: pid of  EqmiServer module
+    # current_tx: next transaction id (one byte on the CTL service)
+    # expected: {msg_id, tx_id} of the request in flight
+    # client_pid: caller waiting for that request's response
     defstruct device_name: nil,
-              current_tx: 0,
+              current_tx: 1,
+              expected: nil,
               client_pid: nil
   end
 
@@ -60,20 +64,22 @@ defmodule Eqmi.Control do
 
   # gen_state_machine callbacks
   def init(dev_name) do
-    tx_id = 0
-    data = %CTLState{device_name: dev_name, current_tx: tx_id + 1}
+    data = %CTLState{device_name: dev_name}
     event = {:next_event, :cast, :sync}
     {:ok, :init_ctl, data, event}
   end
 
   def init_ctl(:cast, :sync, data) do
-    qmux_msg = ctl_msg_base(:sync, [], data.current_tx)
-    Eqmi.Device.send_raw(data.device_name, qmux_msg)
+    data = send_request(data, :sync, [], @sync_msg_id)
     {:next_state, :wait4_sync, data, {:state_timeout, 10_000, :sync_response}}
   end
 
-  def wait4_sync(:info, {:qmux, %{message_type: :response}}, data) do
-    {:next_state, :idle, data}
+  def wait4_sync(:info, {:qmux, %{message_type: :response} = msg}, data) do
+    if expected?(msg, data) do
+      {:next_state, :idle, data}
+    else
+      stale(msg, data)
+    end
   end
 
   def wait4_sync(:info, {:qmux, msg}, _data) do
@@ -100,9 +106,13 @@ defmodule Eqmi.Control do
     {:keep_state_and_data, [{:reply, from, {:error, :sync_timeout}}]}
   end
 
-  def sync_failed(:info, {:qmux, %{message_type: :response}}, data) do
-    Logger.info("late sync response on #{data.device_name}, resuming")
-    {:next_state, :idle, data}
+  def sync_failed(:info, {:qmux, %{message_type: :response} = msg}, data) do
+    if expected?(msg, data) do
+      Logger.info("late sync response on #{data.device_name}, resuming")
+      {:next_state, :idle, data}
+    else
+      stale(msg, data)
+    end
   end
 
   def sync_failed(:info, _msg, _data) do
@@ -111,24 +121,17 @@ defmodule Eqmi.Control do
 
   def idle({:call, from}, {:allocate, service}, data) do
     service = Eqmi.service_type_id(service)
-
-    tx_id = data.current_tx
-    qmux_msg = ctl_msg_base(:allocate_cid, [{:service, service}], tx_id)
-
-    Eqmi.Device.send_raw(data.device_name, qmux_msg)
-    new_data = %{data | client_pid: from, current_tx: tx_id + 1}
-    {:next_state, :wait4_cid, new_data, {:state_timeout, 10_000, :cid_response}}
+    data = send_request(data, :allocate_cid, [{:service, service}], @allocation_msg_id)
+    {:next_state, :wait4_cid, %{data | client_pid: from}, {:state_timeout, 10_000, :cid_response}}
   end
 
   def idle({:call, from}, {:release, service, cid}, data) do
     service = Eqmi.service_type_id(service)
+    params = [{:release_info, [service: service, cid: cid]}]
+    data = send_request(data, :release_cid, params, @release_msg_id)
 
-    tx_id = data.current_tx
-    qmux_msg = ctl_msg_base(:release_cid, [{:release_info, [service: service, cid: cid]}], tx_id)
-
-    Eqmi.Device.send_raw(data.device_name, qmux_msg)
-    new_data = %{data | client_pid: from, current_tx: tx_id + 1}
-    {:next_state, :wait4_release, new_data, {:state_timeout, 10_000, :release_response}}
+    {:next_state, :wait4_release, %{data | client_pid: from},
+     {:state_timeout, 10_000, :release_response}}
   end
 
   def idle(:info, {:qmux, msg}, _data) do
@@ -137,25 +140,27 @@ defmodule Eqmi.Control do
   end
 
   def wait4_cid(:info, {:qmux, %{message_type: :response} = msg}, data) do
-    [h | _] = msg.messages
-    cid = get_cid(h)
+    if expected?(msg, data) do
+      [h | _] = msg.messages
 
-    response =
-      cond do
-        cid != nil ->
-          {:ok, cid}
+      response =
+        case get_cid(h) do
+          nil ->
+            # surface the modem's error (e.g. client IDs exhausted)
+            case qmi_result(msg) do
+              :ok -> {:error, :cid_not_present}
+              err -> err
+            end
 
-        true ->
-          # surface the modem's error (e.g. client IDs exhausted)
-          case qmi_result(msg) do
-            :ok -> {:error, :cid_not_present}
-            err -> err
-          end
-      end
+          cid ->
+            {:ok, cid}
+        end
 
-    GenStateMachine.reply(data.client_pid, response)
-    new_data = %{data | client_pid: nil}
-    {:next_state, :idle, new_data}
+      GenStateMachine.reply(data.client_pid, response)
+      {:next_state, :idle, %{data | client_pid: nil}}
+    else
+      stale(msg, data)
+    end
   end
 
   def wait4_cid(:info, {:qmux, msg}, _data) do
@@ -174,9 +179,12 @@ defmodule Eqmi.Control do
   end
 
   def wait4_release(:info, {:qmux, %{message_type: :response} = msg}, data) do
-    GenStateMachine.reply(data.client_pid, qmi_result(msg))
-    new_data = %{data | client_pid: nil}
-    {:next_state, :idle, new_data}
+    if expected?(msg, data) do
+      GenStateMachine.reply(data.client_pid, qmi_result(msg))
+      {:next_state, :idle, %{data | client_pid: nil}}
+    else
+      stale(msg, data)
+    end
   end
 
   def wait4_release(:info, {:qmux, msg}, _data) do
@@ -214,10 +222,33 @@ defmodule Eqmi.Control do
     {:error, :bad_response}
   end
 
-  defp ctl_msg_base(msg_type, params, tx_id) do
+  # Send a CTL request and remember which response belongs to it. cdc-wdm
+  # keeps unread data across close and reopen, so the first response seen
+  # may be a leftover from an earlier process (typically the release of a
+  # client that was being torn down); only the matching one is accepted.
+  defp send_request(%CTLState{current_tx: tx} = data, msg_type, params, msg_id) do
     msg = Eqmi.CTL.request(msg_type, params)
-    payload = Eqmi.CTL.qmux_sdu(:request, tx_id, [msg])
+    payload = Eqmi.CTL.qmux_sdu(:request, tx, [msg])
     header = Eqmi.QmuxHeader.new(:control_point, 0, :qmi_ctl, byte_size(payload))
-    Eqmi.qmux_message(header, payload)
+    Eqmi.Device.send_raw(data.device_name, Eqmi.qmux_message(header, payload))
+    %{data | expected: {msg_id, tx}, current_tx: next_tx(tx)}
+  end
+
+  # CTL transaction ids are one byte and 0 is reserved
+  defp next_tx(255), do: 1
+  defp next_tx(tx), do: tx + 1
+
+  defp expected?(%{tx_id: tx, messages: [%{msg_id: id} | _]}, %CTLState{expected: {id, tx}}),
+    do: true
+
+  defp expected?(_msg, _data), do: false
+
+  defp stale(msg, %CTLState{expected: {id, tx}} = data) do
+    Logger.debug(
+      "#{data.device_name}: ignoring CTL response #{inspect(msg.messages |> hd() |> Map.get(:name))} " <>
+        "tx #{msg.tx_id} while waiting for message #{id} tx #{tx}"
+    )
+
+    :keep_state_and_data
   end
 end

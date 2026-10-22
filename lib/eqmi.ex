@@ -182,6 +182,7 @@ defmodule Eqmi do
   """
   def query(dev_ref, client, msg_name, params \\ [], timeout \\ 5_000) do
     with {:ok, path} <- GenServer.call(__MODULE__, {:get_path, dev_ref}),
+         {:ok, _pid} <- ensure_running(path),
          {:ok, client_ref, service} <- resolve_client(path, client),
          {:ok, mod} <- spec_module(service),
          params = Keyword.merge(query_defaults(service, msg_name), params),
@@ -198,6 +199,21 @@ defmodule Eqmi do
   defp resolve_client(path, client_ref) do
     with {:ok, service} <- Eqmi.Device.client_type(path, client_ref),
          do: {:ok, client_ref, service}
+  end
+
+  # the Device stops when its node goes away; restart it again,
+  # or return an error if that is not possible
+  defp ensure_running(path) do
+    case Eqmi.Device.whereis(path) do
+      nil ->
+        case GenServer.call(__MODULE__, {:get_device, path, []}, 15_000) do
+          {:ok, _ref} -> {:ok, Eqmi.Device.whereis(path)}
+          {:error, reason} -> {:error, {:device_down, reason}}
+        end
+
+      pid ->
+        {:ok, pid}
+    end
   end
 
   defp spec_module(service) do
@@ -218,49 +234,37 @@ defmodule Eqmi do
   defp query_result(resp), do: {:error, {:bad_response, resp}}
 
   def init(_) do
-    {:ok, %{devices: %{}, refs: %{}}}
+    # devices: path => ref, refs: ref => path, opts: path => the options the
+    # device was opened with (reused when it is started again)
+    {:ok, %{devices: %{}, refs: %{}, opts: %{}}}
   end
 
   def handle_call({:get_device, device_path, opts}, _from, state) do
     path = device_path |> String.trim()
     ref = Map.get(state.devices, path)
+    # a device that stopped (its node went away) or was lost with its
+    # supervisor is started again under the same ref, with the options it
+    # was first opened with unless the caller gives new ones
+    opts = if opts == [], do: Map.get(state.opts, path, []), else: opts
 
-    # the Device may have been lost with its supervisor since it was opened;
-    # a known path whose process is gone is started again under the same ref
-    cond do
-      ref != nil and Eqmi.Device.whereis(path) != nil ->
-        {:reply, {:ok, ref}, state}
+    if ref != nil and Eqmi.Device.whereis(path) != nil do
+      {:reply, {:ok, ref}, state}
+    else
+      case DynamicSupervisor.start_child(
+             Eqmi.DynamicSupervisor,
+             {Eqmi.Device, [device: path] ++ opts}
+           ) do
+        {:ok, _pid} ->
+          state = remember(state, path, ref, opts)
+          {:reply, {:ok, Map.fetch!(state.devices, path)}, state}
 
-      true ->
-        case DynamicSupervisor.start_child(
-               Eqmi.DynamicSupervisor,
-               {Eqmi.Device, [device: path] ++ opts}
-             ) do
-          {:ok, _pid} ->
-            ref = ref || make_ref()
+        {:error, {:already_started, _pid}} ->
+          state = remember(state, path, ref, opts)
+          {:reply, {:ok, Map.fetch!(state.devices, path)}, state}
 
-            state = %{
-              state
-              | devices: Map.put(state.devices, path, ref),
-                refs: Map.put(state.refs, ref, path)
-            }
-
-            {:reply, {:ok, ref}, state}
-
-          {:error, {:already_started, _pid}} ->
-            ref = ref || make_ref()
-
-            state = %{
-              state
-              | devices: Map.put(state.devices, path, ref),
-                refs: Map.put(state.refs, ref, path)
-            }
-
-            {:reply, {:ok, ref}, state}
-
-          {:error, error} ->
-            {:reply, {:error, error}, state}
-        end
+        {:error, error} ->
+          {:reply, {:error, error}, state}
+      end
     end
   end
 
@@ -273,7 +277,13 @@ defmodule Eqmi do
         if pid = Eqmi.Device.whereis(path),
           do: DynamicSupervisor.terminate_child(Eqmi.DynamicSupervisor, pid)
 
-        {:reply, :ok, %{state | devices: Map.delete(state.devices, path), refs: refs}}
+        {:reply, :ok,
+         %{
+           state
+           | devices: Map.delete(state.devices, path),
+             refs: refs,
+             opts: Map.delete(state.opts, path)
+         }}
     end
   end
 
@@ -285,6 +295,17 @@ defmodule Eqmi do
       path ->
         {:reply, {:ok, path}, state}
     end
+  end
+
+  defp remember(state, path, ref, opts) do
+    ref = ref || make_ref()
+
+    %{
+      state
+      | devices: Map.put(state.devices, path, ref),
+        refs: Map.put(state.refs, ref, path),
+        opts: Map.put(state.opts, path, opts)
+    }
   end
 
   def handle_info(msg, s) do

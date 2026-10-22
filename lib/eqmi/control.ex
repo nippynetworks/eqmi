@@ -82,8 +82,9 @@ defmodule Eqmi.Control do
     end
   end
 
+  # the modem broadcasts a sync indication when any control point syncs
   def wait4_sync(:info, {:qmux, msg}, _data) do
-    Logger.warning("Waiting 4 sync indication [#{inspect(msg)}]")
+    Logger.debug("CTL message while waiting for the sync response: #{inspect(msg)}")
     :keep_state_and_data
   end
 
@@ -164,7 +165,7 @@ defmodule Eqmi.Control do
   end
 
   def wait4_cid(:info, {:qmux, msg}, _data) do
-    Logger.warning("Waiting 4 cid indication [#{inspect(msg)}]")
+    Logger.debug("CTL message while waiting for the allocation response: #{inspect(msg)}")
     :keep_state_and_data
   end
 
@@ -188,7 +189,7 @@ defmodule Eqmi.Control do
   end
 
   def wait4_release(:info, {:qmux, msg}, _data) do
-    Logger.warning("Waiting 4 release response [#{inspect(msg)}]")
+    Logger.debug("CTL message while waiting for the release response: #{inspect(msg)}")
     :keep_state_and_data
   end
 

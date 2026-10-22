@@ -18,6 +18,17 @@ defmodule Eqmi.Device do
     GenServer.start_link(__MODULE__, args, name: name)
   end
 
+  # A device that stops because its node went away (reader EOF or ENODEV,
+  # Control gone) must not be restarted in a loop: Eqmi.device/1 starts it
+  # again when a caller next asks, by which time the node may be back.
+  def child_spec(args) do
+    %{
+      id: {__MODULE__, Keyword.fetch!(args, :device)},
+      start: {__MODULE__, :start_link, [args]},
+      restart: :transient
+    }
+  end
+
   defp via_tuple(dev_name) do
     {:via, Registry, {:eqmi_registry, dev_name}}
   end
@@ -49,7 +60,7 @@ defmodule Eqmi.Device do
         dev_name
         |> base_name()
         |> via_tuple()
-        |> GenServer.call({:new_client, type, cid})
+        |> safe_call({:new_client, type, cid})
 
       {:error, reason} ->
         {:error, reason}
@@ -65,9 +76,9 @@ defmodule Eqmi.Device do
       |> base_name()
       |> via_tuple()
 
-    with {:ok, client} <- GenServer.call(name, {:get_client, ref}) do
+    with {:ok, client} <- safe_call(name, {:get_client, ref}) do
       Eqmi.Control.release_cid(dev_name, client.type, client.id)
-      GenServer.call(name, {:release, ref})
+      safe_call(name, {:release, ref})
     else
       err -> err
     end
@@ -81,13 +92,13 @@ defmodule Eqmi.Device do
   def shared_client(dev_name, type) do
     name = dev_name |> base_name() |> via_tuple()
 
-    case GenServer.call(name, {:shared_client, type}) do
+    case safe_call(name, {:shared_client, type}) do
       {:ok, ref} ->
         {:ok, ref}
 
       :none ->
         case Eqmi.Control.allocate_cid(dev_name, type) do
-          {:ok, cid} -> GenServer.call(name, {:new_shared_client, type, cid})
+          {:ok, cid} -> safe_call(name, {:new_shared_client, type, cid})
           {:error, reason} -> {:error, reason}
           other -> {:error, {:allocate, other}}
         end
@@ -103,12 +114,12 @@ defmodule Eqmi.Device do
     dev_name
     |> base_name()
     |> via_tuple()
-    |> GenServer.call({:controlling_process, ref, pid})
+    |> safe_call({:controlling_process, ref, pid})
   end
 
   @doc "Service type (e.g. `:qmi_nas`) of an allocated client."
   def client_type(dev_name, ref) do
-    with {:ok, client} <- GenServer.call(base_name(dev_name) |> via_tuple(), {:get_client, ref}) do
+    with {:ok, client} <- safe_call(base_name(dev_name) |> via_tuple(), {:get_client, ref}) do
       {:ok, client.type}
     end
   end
@@ -117,7 +128,7 @@ defmodule Eqmi.Device do
     dev_name
     |> base_name()
     |> via_tuple()
-    |> GenServer.call({:send_msg, ref, msg})
+    |> safe_call({:send_msg, ref, msg})
   end
 
   @doc """
@@ -129,14 +140,23 @@ defmodule Eqmi.Device do
     dev_name
     |> base_name()
     |> via_tuple()
-    |> GenServer.call({:call_msg, ref, msg, timeout}, timeout + 1_000)
+    |> safe_call({:call_msg, ref, msg, timeout}, timeout + 1_000)
+  end
+
+  # The device process may have stopped (its node went away); callers get
+  # an error rather than an exit.
+  defp safe_call(name, request, timeout \\ 5_000) do
+    GenServer.call(name, request, timeout)
+  catch
+    :exit, {:noproc, _} -> {:error, :device_down}
+    :exit, {{:shutdown, _}, _} -> {:error, :device_down}
   end
 
   def send_raw(dev_name, msg) do
     dev_name
     |> base_name()
     |> via_tuple()
-    |> GenServer.call({:send_raw, msg})
+    |> safe_call({:send_raw, msg})
   end
 
   def init(args) do
@@ -146,6 +166,26 @@ defmodule Eqmi.Device do
     # so terminate/2 runs on supervisor shutdown and the clients get released
     Process.flag(:trap_exit, true)
 
+    # Opening a path for writing creates a regular file when nothing is
+    # there. After a modem is unplugged or powered off the node is gone, and
+    # a file left in its place reads back our own frames and then blocks the
+    # real node from being created when the modem returns. So only an
+    # existing character device is opened.
+    case device_node(device) do
+      :ok -> open_device(device, options, transport)
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp device_node(device) do
+    case File.stat(device) do
+      {:ok, %File.Stat{type: :device}} -> :ok
+      {:ok, %File.Stat{type: type}} -> {:error, {:not_a_device, type}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp open_device(device, options, transport) do
     case File.open(device, options) do
       {:ok, dev} ->
         {:ok, reader} = Eqmi.Reader.start_link(self(), device, transport)

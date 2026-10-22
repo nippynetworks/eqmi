@@ -94,6 +94,18 @@ defmodule Eqmi.Device do
     end
   end
 
+  @doc """
+  Make another process the controlling process of a client: it receives
+  the client's indications and the client is released when it exits. The
+  client reference stays the same.
+  """
+  def controlling_process(dev_name, ref, pid) when is_pid(pid) do
+    dev_name
+    |> base_name()
+    |> via_tuple()
+    |> GenServer.call({:controlling_process, ref, pid})
+  end
+
   @doc "Service type (e.g. `:qmi_nas`) of an allocated client."
   def client_type(dev_name, ref) do
     with {:ok, client} <- GenServer.call(base_name(dev_name) |> via_tuple(), {:get_client, ref}) do
@@ -147,6 +159,9 @@ defmodule Eqmi.Device do
           control_points: %{},
           clients: %{},
           shared: %{},
+          # monitor reference => client reference, for clients that were
+          # transferred (the client reference is the first owner's monitor)
+          monitors: %{},
           pending: %{},
           ctl: nil
         }
@@ -264,6 +279,28 @@ defmodule Eqmi.Device do
   def handle_call({:release, ref}, _from, s) do
     new_state = release_base(ref, s)
     {:reply, :ok, new_state}
+  end
+
+  def handle_call({:controlling_process, ref, pid}, _from, %{control_points: controls} = s) do
+    case Map.get(controls, ref) do
+      %ClientState{type: type, id: cid} = cp ->
+        Process.demonitor(ref, [:flush])
+        monitors = s.monitors |> Enum.reject(fn {_mon, r} -> r == ref end) |> Map.new()
+        mon = Process.monitor(pid)
+        clients_ids = s.clients |> Map.get(type, %{}) |> Map.put(cid, pid)
+
+        s = %{
+          s
+          | control_points: Map.put(controls, ref, %{cp | pid: pid}),
+            clients: Map.put(s.clients, type, clients_ids),
+            monitors: Map.put(monitors, mon, ref)
+        }
+
+        {:reply, :ok, s}
+
+      nil ->
+        {:reply, {:error, :unknown_client}, s}
+    end
   end
 
   def handle_call({:shared_client, type}, _from, %{shared: shared} = s) do
@@ -399,7 +436,12 @@ defmodule Eqmi.Device do
     end
   end
 
-  def handle_info({:DOWN, ref, :process, _object, _reason}, state) do
+  def handle_info({:DOWN, mon, :process, _object, _reason}, state) do
+    # a transferred client is keyed by its original reference, not by the
+    # current owner's monitor
+    ref = Map.get(state.monitors, mon, mon)
+    state = %{state | monitors: Map.delete(state.monitors, mon)}
+
     # release the CID on the modem too, or it stays allocated until the
     # modem reboots; async because Control calls back into this server
     # to write to the device
@@ -496,7 +538,21 @@ defmodule Eqmi.Device do
         s
 
       control_point ->
+        # the monitor is the client ref for the first owner, or the entry
+        # in `monitors` after a transfer
         Process.demonitor(ref, [:flush])
+
+        monitors =
+          Enum.reduce(s.monitors, %{}, fn
+            {mon, ^ref}, acc ->
+              Process.demonitor(mon, [:flush])
+              acc
+
+            {mon, r}, acc ->
+              Map.put(acc, mon, r)
+          end)
+
+        s = %{s | monitors: monitors}
         new_controls = Map.delete(controls, ref)
 
         new_client_list =

@@ -78,6 +78,18 @@ defmodule Eqmi do
     end
   end
 
+  @doc """
+  Make `pid` the controlling process of a client, as `:gen_tcp.controlling_process/2`
+  does for a socket: it receives the client's indications and the client
+  is released when it exits. Lets a helper process allocate and set up a
+  client, then hand it to the process that will keep it.
+  """
+  def controlling_process(dev_ref, client_ref, pid) do
+    with {:ok, path} <- GenServer.call(__MODULE__, {:get_path, dev_ref}) do
+      Eqmi.Device.controlling_process(path, client_ref, pid)
+    end
+  end
+
   def send_message(dev_ref, client_ref, msg) do
     with {:ok, path} <- GenServer.call(__MODULE__, {:get_path, dev_ref}) do
       Eqmi.Device.send_message(path, client_ref, msg)

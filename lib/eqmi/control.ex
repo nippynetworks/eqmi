@@ -14,11 +14,22 @@ defmodule Eqmi.Control do
     # current_tx: next transaction id (one byte on the CTL service)
     # expected: {msg_id, tx_id} of the request in flight
     # client_pid: caller waiting for that request's response
+    # sync_attempts: sync requests sent without an answer so far
     defstruct device_name: nil,
               current_tx: 1,
               expected: nil,
-              client_pid: nil
+              client_pid: nil,
+              sync_attempts: 0,
+              sync_timeout: 10_000,
+              resync_ms: 5_000
   end
+
+  # The CTL sync (0x27) makes the modem drop every client ID it had handed
+  # out and proves it is talking to us. A modem that has only just
+  # enumerated may not answer yet, its QMI stack is still starting, so an
+  # unanswered sync is sent again every :resync_ms until one is answered.
+  # In between, callers get {:error, :sync_timeout} at once rather than
+  # waiting out their own call timeout.
 
   defp via_tuple(dev_name) do
     {:via, Registry, {:eqmi_registry, dev_name}}
@@ -31,16 +42,20 @@ defmodule Eqmi.Control do
   end
 
   @doc """
-  Start up a CallControl GenStateMachine.
+  Start the CTL control point for a device; it syncs with the modem first.
+
+  Options (for tests): `:sync_timeout` - how long to wait for the sync
+  response (default 10 s); `:resync_ms` - how long after an unanswered sync
+  to send the next one (default 5 s).
   """
-  @spec start_link([term]) :: {:ok, pid} | {:error, term}
-  def start_link(device_name) do
+  @spec start_link(String.t(), keyword()) :: {:ok, pid} | {:error, term}
+  def start_link(device_name, opts \\ []) do
     name =
       device_name
       |> base_name()
       |> via_tuple()
 
-    GenStateMachine.start_link(__MODULE__, device_name, name: name)
+    GenStateMachine.start_link(__MODULE__, {device_name, opts}, name: name)
   end
 
   @doc """
@@ -63,61 +78,96 @@ defmodule Eqmi.Control do
   end
 
   # gen_state_machine callbacks
-  def init(dev_name) do
-    data = %CTLState{device_name: dev_name}
+  def init({dev_name, opts}) do
+    data = %CTLState{
+      device_name: dev_name,
+      sync_timeout: Keyword.get(opts, :sync_timeout, 10_000),
+      resync_ms: Keyword.get(opts, :resync_ms, 5_000)
+    }
+
     event = {:next_event, :cast, :sync}
     {:ok, :init_ctl, data, event}
   end
 
   def init_ctl(:cast, :sync, data) do
-    data = send_request(data, :sync, [], @sync_msg_id)
-    {:next_state, :wait4_sync, data, {:state_timeout, 10_000, :sync_response}}
+    send_sync(data)
   end
 
   def wait4_sync(:info, {:qmux, %{message_type: :response} = msg}, data) do
     if expected?(msg, data) do
-      {:next_state, :idle, data}
+      synced(data)
     else
       stale(msg, data)
     end
   end
 
-  # the modem broadcasts a sync indication when any control point syncs
+  # the modem broadcasts a sync indication when any control point syncs,
+  # our own request included, so one here says nothing new
   def wait4_sync(:info, {:qmux, msg}, _data) do
     Logger.debug("CTL message while waiting for the sync response: #{inspect(msg)}")
     :keep_state_and_data
   end
 
   def wait4_sync(:state_timeout, :sync_response, data) do
-    Logger.error(
-      "no response to QMI CTL sync on #{data.device_name}; " <>
-        "device is not speaking raw QMUX (modem in MBIM mode?)"
-    )
+    # expected once after a cold start (the stack is not up yet), so a
+    # warning; a device that never answers keeps failing at debug level
+    if data.sync_attempts == 1 do
+      Logger.warning(
+        "no response to QMI CTL sync on #{data.device_name}; " <>
+          "the modem is still starting, or the device is not speaking raw QMUX " <>
+          "(modem in MBIM mode?); trying again every #{data.resync_ms} ms"
+      )
+    else
+      Logger.debug("QMI CTL sync on #{data.device_name} unanswered (#{data.sync_attempts})")
+    end
 
-    {:next_state, :sync_failed, data}
+    {:next_state, :sync_failed, data, {:state_timeout, data.resync_ms, :resync}}
   end
 
   def wait4_sync({:call, _from}, _msg, _data) do
     {:keep_state_and_data, [:postpone]}
   end
 
-  # The device never answered the CTL sync request; answer callers with an
-  # error instead of leaving them to hit their own call timeout.
+  # The device has not answered a CTL sync yet: answer callers with an
+  # error instead of leaving them to hit their own call timeout, and try
+  # again shortly.
   def sync_failed({:call, from}, _msg, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :sync_timeout}}]}
+  end
+
+  def sync_failed(:state_timeout, :resync, data) do
+    send_sync(data)
   end
 
   def sync_failed(:info, {:qmux, %{message_type: :response} = msg}, data) do
     if expected?(msg, data) do
       Logger.info("late sync response on #{data.device_name}, resuming")
-      {:next_state, :idle, data}
+      synced(data)
     else
       stale(msg, data)
     end
   end
 
+  # the modem's QMI stack has just (re)started: ask it again now
+  def sync_failed(:info, {:qmux, %{message_type: :indication} = msg}, data) do
+    case msg.messages do
+      [%{msg_id: @sync_msg_id} | _] -> send_sync(data)
+      _ -> :keep_state_and_data
+    end
+  end
+
   def sync_failed(:info, _msg, _data) do
     :keep_state_and_data
+  end
+
+  defp send_sync(data) do
+    data = %{send_request(data, :sync, [], @sync_msg_id) | sync_attempts: data.sync_attempts + 1}
+    {:next_state, :wait4_sync, data, {:state_timeout, data.sync_timeout, :sync_response}}
+  end
+
+  defp synced(%CTLState{sync_attempts: n} = data) do
+    if n > 1, do: Logger.info("QMI CTL sync on #{data.device_name} answered after #{n} attempts")
+    {:next_state, :idle, %{data | sync_attempts: 0}}
   end
 
   def idle({:call, from}, {:allocate, service}, data) do

@@ -21,4 +21,10 @@ defmodule EqmiErrorTest do
     assert Eqmi.Error.verbose_call_end_reason(6, 33) == {:"3gpp", :option_unsubscribed}
     assert Eqmi.Error.verbose_call_end_reason(99, 1) == {99, 1}
   end
+
+  test "3GPP registration reject causes" do
+    assert Eqmi.Error.reject_cause(0x0B) == :plmn_not_allowed
+    assert Eqmi.Error.reject_cause(0x03) == :illegal_ue
+    assert Eqmi.Error.reject_cause(0xF0) == 0xF0
+  end
 end

@@ -593,6 +593,72 @@ defmodule Eqmi.Error do
     }
   }
 
+  # 3GPP registration reject causes (TS 24.008 / 24.301), as named in
+  # libqmi's QmiNasRejectCause; carried by NAS System Info
+  # (registration_reject_cause) and the Network Reject indication
+  @reject_causes %{
+    0 => :none,
+    2 => :imsi_unknown_in_hlr,
+    3 => :illegal_ue,
+    4 => :imsi_unknown_in_vlr,
+    5 => :imei_not_accepted,
+    6 => :illegal_me,
+    7 => :ps_services_not_allowed,
+    8 => :ps_and_non_ps_services_not_allowed,
+    9 => :ue_identity_not_derived_by_network,
+    10 => :implicitly_detached,
+    11 => :plmn_not_allowed,
+    12 => :location_area_not_allowed,
+    13 => :roaming_in_location_area_not_allowed,
+    14 => :ps_services_in_location_area_not_allowed,
+    15 => :no_suitable_cells_in_location_area,
+    16 => :msc_temporarily_not_reachable,
+    17 => :network_failure,
+    18 => :cs_domain_not_available,
+    19 => :esm_failure,
+    20 => :mac_failure,
+    21 => :synch_failure,
+    22 => :congestion,
+    23 => :ue_security_capabilities_mismatch,
+    24 => :security_mode_rejected_unspecified,
+    25 => :csg_not_authorized,
+    26 => :non_eps_authentication_unacceptable,
+    28 => :sms_provided_by_gprs_in_routing_area,
+    31 => :redirection_to_5gcn_required,
+    32 => :service_option_not_supported,
+    33 => :requested_service_option_not_subscribed,
+    34 => :service_option_temporarily_out_of_order,
+    35 => :requested_service_option_not_authorized,
+    38 => :call_cannot_be_identified,
+    39 => :cs_service_temporarily_not_available,
+    40 => :no_eps_bearer_context_activated,
+    42 => :severe_network_failure,
+    48 => :retry_upon_entry_into_new_cell_0,
+    49 => :retry_upon_entry_into_new_cell_1,
+    50 => :retry_upon_entry_into_new_cell_2,
+    51 => :retry_upon_entry_into_new_cell_3,
+    52 => :retry_upon_entry_into_new_cell_4,
+    53 => :retry_upon_entry_into_new_cell_5,
+    54 => :retry_upon_entry_into_new_cell_6,
+    55 => :retry_upon_entry_into_new_cell_7,
+    56 => :retry_upon_entry_into_new_cell_8,
+    57 => :retry_upon_entry_into_new_cell_9,
+    58 => :retry_upon_entry_into_new_cell_10,
+    59 => :retry_upon_entry_into_new_cell_11,
+    60 => :retry_upon_entry_into_new_cell_12,
+    61 => :retry_upon_entry_into_new_cell_13,
+    62 => :retry_upon_entry_into_new_cell_14,
+    63 => :retry_upon_entry_into_new_cell_15,
+    95 => :semantically_incorrect_message,
+    96 => :invalid_mandatory_information,
+    97 => :message_type_non_existent,
+    98 => :message_type_not_compatible,
+    99 => :information_element_non_existent,
+    100 => :conditional_information_element_error,
+    101 => :message_not_compatible,
+    111 => :unspecified_protocol_error
+  }
+
   @doc "Name of a QMI protocol error code, or the code itself when unknown."
   @spec protocol(non_neg_integer()) :: atom() | non_neg_integer()
   def protocol(code), do: Map.get(@protocol_errors, code, code)
@@ -602,6 +668,14 @@ defmodule Eqmi.Error do
   def protocol_code(name) do
     Enum.find_value(@protocol_errors, fn {code, n} -> if n == name, do: code end)
   end
+
+  @doc """
+  Name of a 3GPP registration reject cause (NAS System Info
+  `registration_reject_cause`, Network Reject `reject_cause`), or the
+  code itself when unknown.
+  """
+  @spec reject_cause(non_neg_integer()) :: atom() | non_neg_integer()
+  def reject_cause(code), do: Map.get(@reject_causes, code, code)
 
   @doc "Name of a WDS call end reason (Start Network `call_end_reason` TLV)."
   @spec call_end_reason(non_neg_integer()) :: atom() | non_neg_integer()

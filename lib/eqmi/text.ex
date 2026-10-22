@@ -72,6 +72,15 @@ defmodule Eqmi.Text do
   end
 
   @doc """
+  Map unpacked GSM 7-bit characters (one septet per byte, as SIM files
+  such as EF_SPN store them) to a UTF-8 string, or nil if any has no
+  mapping.
+  """
+  def from_gsm7_unpacked(bin) when is_binary(bin) do
+    bin |> :binary.bin_to_list() |> Enum.map(&(&1 &&& 0x7F)) |> map_gsm([])
+  end
+
+  @doc """
   Convert UCS-2 little-endian bytes to UTF-8, or nil if not valid.
   """
   def from_ucs2le(bin) when rem(byte_size(bin), 2) == 0 and bin != <<>> do
